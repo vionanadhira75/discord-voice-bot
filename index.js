@@ -3,6 +3,11 @@ import axios from 'axios';
 import chalk from 'chalk';
 import WebSocket from 'ws';
 
+// Rotasi build number agar tidak statis — Discord track nilai ini
+const BUILD_NUMBERS = [355048, 356138, 357063, 358152, 359000];
+const CHROME_VERSIONS = ['128.0.0.0', '129.0.0.0', '130.0.0.0'];
+const getRandom = (arr) => arr[Math.floor(Math.random() * arr.length)];
+
 class VoiceBot {
     constructor(token, channelId, selfMute = true, selfDeaf = true) {
         this.token = token;
@@ -15,17 +20,61 @@ class VoiceBot {
         this.heartbeatInterval = null;
         this.heartbeatTimer = null;
         this.seq = null;
-        this.baseUrl = "https://discord.com/api/v9";
+        this.sessionId = null;
+        this.baseUrl = "https://discord.com/api/v10";
         this.isReconnecting = false;
+
+        // Randomize per-instance fingerprint agar setiap token punya identitas berbeda
+        this.chromeVersion = getRandom(CHROME_VERSIONS);
+        this.buildNumber = getRandom(BUILD_NUMBERS);
+        this.userAgent = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${this.chromeVersion} Safari/537.36`;
+
+        // Header HTTP lengkap yang dikirim browser nyata
+        this.httpHeaders = {
+            'Authorization': this.token,
+            'User-Agent': this.userAgent,
+            'Accept': '*/*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Origin': 'https://discord.com',
+            'Referer': 'https://discord.com/channels/@me',
+            'Sec-Ch-Ua': `"Chromium";v="${this.chromeVersion.split('.')[0]}", "Google Chrome";v="${this.chromeVersion.split('.')[0]}", "Not?A_Brand";v="99"`,
+            'Sec-Ch-Ua-Mobile': '?0',
+            'Sec-Ch-Ua-Platform': '"Windows"',
+            'Sec-Fetch-Dest': 'empty',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Site': 'same-origin',
+            'X-Discord-Locale': 'en-US',
+            'X-Discord-Timezone': 'Asia/Jakarta',
+            'X-Super-Properties': this._buildSuperProperties(),
+        };
+    }
+
+    _buildSuperProperties() {
+        const props = {
+            os: "Windows",
+            browser: "Chrome",
+            device: "",
+            system_locale: "en-US",
+            browser_user_agent: this.userAgent,
+            browser_version: this.chromeVersion,
+            os_version: "10",
+            referrer: "",
+            referring_domain: "",
+            referrer_current: "",
+            referring_domain_current: "",
+            release_channel: "stable",
+            client_build_number: this.buildNumber,
+            client_event_source: null
+        };
+        // Base64 encode seperti yang dikirim client asli
+        return Buffer.from(JSON.stringify(props)).toString('base64');
     }
 
     async getChannelGuild() {
         try {
             const response = await axios.get(`${this.baseUrl}/channels/${this.channelId}`, {
-                headers: { 
-                    'Authorization': this.token,
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36'
-                }
+                headers: this.httpHeaders
             });
             this.guildId = response.data.guild_id;
             return this.guildId;
@@ -37,10 +86,7 @@ class VoiceBot {
     async getUsername() {
         try {
             const response = await axios.get(`${this.baseUrl}/users/@me`, {
-                headers: { 
-                    'Authorization': this.token,
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36'
-                }
+                headers: this.httpHeaders
             });
             this.username = `${response.data.username}#${response.data.discriminator || '0000'}`;
             return this.username;
@@ -93,7 +139,8 @@ class VoiceBot {
                         break;
                     case 0: // Event Dispatch
                         if (t === 'READY') {
-                            console.log(chalk.green(`[SUCCESS] [${this.username}] Logged in successfully!`));
+                            this.sessionId = d?.session_id || null;
+                            console.log(chalk.green(`[SUCCESS] [${this.username}] Logged in successfully! (build: ${this.buildNumber})`));
                             this.joinVoice();
                         }
                         break;
@@ -146,26 +193,25 @@ class VoiceBot {
 
     identify() {
         if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-            // Mimic a real desktop Chrome client on Windows 10 to bypass basic selfbot checks
             const payload = {
                 op: 2,
                 d: {
                     token: this.token,
-                    capabilities: 16381,
+                    capabilities: 30717,
                     properties: {
                         os: "Windows",
                         browser: "Chrome",
                         device: "",
                         system_locale: "en-US",
-                        browser_user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
-                        browser_version: "127.0.0.0",
+                        browser_user_agent: this.userAgent,
+                        browser_version: this.chromeVersion,
                         os_version: "10",
                         referrer: "",
                         referring_domain: "",
                         referrer_current: "",
                         referring_domain_current: "",
                         release_channel: "stable",
-                        client_build_number: 321157,
+                        client_build_number: this.buildNumber,
                         client_event_source: null
                     },
                     presence: {
@@ -261,10 +307,13 @@ async function main() {
         bot.start();
 
         if (i < tokens.length - 1) {
-            // Add random jitter to login delays (between -1.5s to +1.5s of the token delay setting, min 2s)
-            const jitter = (Math.random() * 3000) - 1500;
-            const delay = Math.max(2000, (tokenDelaySetting * 1000) + jitter);
-            console.log(chalk.gray(`[DELAY] Waiting ${(delay / 1000).toFixed(2)} seconds before starting the next bot connection...`));
+            // Jitter lebih lebar: antara 3s - 12s dari TOKEN_DELAY setting
+            // Pola manusiawi: sesekali delay lebih panjang (simulasi jeda natural)
+            const baseDelay = tokenDelaySetting * 1000;
+            const jitter = (Math.random() * 6000) - 3000;
+            const humanPause = Math.random() < 0.2 ? Math.random() * 8000 : 0; // 20% chance extra long pause
+            const delay = Math.max(3000, baseDelay + jitter + humanPause);
+            console.log(chalk.gray(`[DELAY] Waiting ${(delay / 1000).toFixed(2)}s before next connection...`));
             await new Promise(resolve => setTimeout(resolve, delay));
         }
     }
